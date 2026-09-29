@@ -1,0 +1,22 @@
+process counter(int start) {
+    int n = start;
+    bool running = true;
+    while running {
+        receive {
+            inc(int k) => { n = n + k; }
+            get(pid from) => { send from ! value(n); }
+            stop() => { running = false; }
+        }
+    }
+}
+
+void main() {
+    pid c = spawn counter(0);
+    send c ! inc(5);
+    send c ! inc(2);
+    send c ! get(self);
+    receive {
+        value(int v) => { print(v); }
+    }
+    send c ! stop();
+}

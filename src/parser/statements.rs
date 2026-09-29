@@ -5,23 +5,36 @@
 //! Exposes two public functions:
 //!
 //! * [`statement`] — the top-level entry point; tries each statement form in
-//!   order: `return`, `if`, `while`, call-statement, block, declaration,
-//!   assignment.
+//!   order: block, `if`, `while`, `receive`, `send`, `return`, declaration,
+//!   call-statement, assignment.
+//! * [`block_statement`] — parses `{ stmt* }`; re-used by process
+//!   declarations, whose body must be a block.
 //! * [`assignment`] — parses `lvalue = expression ;`; exported separately
 //!   because the test suite uses it directly.
 //!
 //! # Grammar
 //!
 //! ```text
-//! statement  := block | if_stmt | while_stmt | simple ';'
+//! statement  := block | if_stmt | while_stmt | receive | simple ';'
 //! block      := '{' statement* '}'
 //! if_stmt    := 'if' expr block ['else' block]
 //! while_stmt := 'while' expr block
-//! simple     := return | decl | call | assign
+//! receive    := 'receive' '{' clause+ '}'
+//! clause     := ident '(' params ')' '=>' block
+//! simple     := return | send | decl | call | assign
+//! send       := 'send' expr '!' ident '(' args ')'
 //! ```
 //!
 //! Every simple statement is terminated by `;`.
-//! Compound statements (`if`, `while`, block) end with `}` and need no `;`.
+//! Compound statements (`if`, `while`, `receive`, block) end with `}` and need no `;`.
+//!
+//! ## `send` target vs. the `!=` operator
+//!
+//! In `send target ! tag(args);` the target is a full expression. The
+//! expression parser never consumes a lone `!` in infix position (only `!=`),
+//! so it stops right before the message separator. The separator itself is
+//! parsed as `!` *not followed by* `=`, so `send a != b ! m();` means
+//! "send `m()` to the result of `a != b`" and never splits `!=`.
 //!
 //! # Design Decisions
 //!
@@ -40,17 +53,19 @@
 //! suffixes in a loop using the same pattern as the `primary` parser in
 //! `expressions.rs`, producing a left-associative `Index` chain.
 
-use crate::ir::ast::{Expr, ExprD, Statement, StatementD, UncheckedExpr, UncheckedStmt};
+use crate::ir::ast::{
+    Expr, ExprD, Message, ReceiveClause, Statement, StatementD, UncheckedExpr, UncheckedStmt,
+};
 use crate::parser::expressions::{expression, parse_call};
-use crate::parser::functions::type_name;
-use crate::parser::identifiers::identifier;
+use crate::parser::functions::{param_list, type_name};
+use crate::parser::identifiers::{identifier, keyword};
 use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete::{char, multispace0},
-    combinator::{map, opt},
-    multi::many0,
-    sequence::{delimited, preceded, tuple},
+    combinator::{map, not, opt},
+    multi::{many0, many1},
+    sequence::{delimited, preceded, terminated, tuple},
     IResult,
 };
 
@@ -58,7 +73,7 @@ fn wrap(s: Statement<()>) -> UncheckedStmt {
     StatementD { stmt: s, ty: () }
 }
 
-/// Parse any statement: block | if | while | return | decl | call | assignment.
+/// Parse any statement: block | if | while | receive | send | return | decl | call | assignment.
 pub fn statement(input: &str) -> IResult<&str, UncheckedStmt> {
     preceded(
         multispace0,
@@ -66,6 +81,8 @@ pub fn statement(input: &str) -> IResult<&str, UncheckedStmt> {
             block_statement,
             if_statement,
             while_statement,
+            receive_statement,
+            send_statement,
             return_statement,
             decl_statement,
             call_statement,
@@ -104,7 +121,7 @@ fn decl_statement(input: &str) -> IResult<&str, UncheckedStmt> {
 
 /// Parse a block statement: `{ stmt* }`.
 /// Each statement inside the block carries its own terminator (`;` or `}`).
-fn block_statement(input: &str) -> IResult<&str, UncheckedStmt> {
+pub fn block_statement(input: &str) -> IResult<&str, UncheckedStmt> {
     map(
         delimited(
             preceded(multispace0, char('{')),
@@ -120,6 +137,50 @@ fn call_statement(input: &str) -> IResult<&str, UncheckedStmt> {
     let (rest, (name, args)) = parse_call(input)?;
     let (rest, _) = preceded(multispace0, char(';'))(rest)?;
     Ok((rest, wrap(Statement::Call { name, args })))
+}
+
+/// Parse an asynchronous send: `send expr ! ident ( expr_list ) ;`.
+/// The `!` separator must not be followed by `=` (that would be `!=`).
+fn send_statement(input: &str) -> IResult<&str, UncheckedStmt> {
+    let (rest, _) = preceded(multispace0, keyword("send"))(input)?;
+    let (rest, target) = preceded(multispace0, expression)(rest)?;
+    let (rest, _) = preceded(multispace0, terminated(char('!'), not(char('='))))(rest)?;
+    let (rest, (tag, args)) = parse_call(rest)?;
+    let (rest, _) = preceded(multispace0, char(';'))(rest)?;
+    Ok((
+        rest,
+        wrap(Statement::Send {
+            target: Box::new(target),
+            message: Message { tag, args },
+        }),
+    ))
+}
+
+/// Parse a receive clause: `ident ( params ) => block`.
+fn receive_clause(input: &str) -> IResult<&str, ReceiveClause<()>> {
+    let (rest, tag_name) = preceded(multispace0, identifier)(input)?;
+    let (rest, params) = param_list(rest)?;
+    let (rest, _) = preceded(multispace0, tag("=>"))(rest)?;
+    let (rest, body) = preceded(multispace0, block_statement)(rest)?;
+    Ok((
+        rest,
+        ReceiveClause {
+            tag: tag_name.to_string(),
+            params,
+            body: Box::new(body),
+        },
+    ))
+}
+
+/// Parse a blocking receive: `receive { clause+ }`. At least one clause is required.
+fn receive_statement(input: &str) -> IResult<&str, UncheckedStmt> {
+    let (rest, _) = preceded(multispace0, keyword("receive"))(input)?;
+    let (rest, clauses) = delimited(
+        preceded(multispace0, char('{')),
+        many1(receive_clause),
+        preceded(multispace0, char('}')),
+    )(rest)?;
+    Ok((rest, wrap(Statement::Receive { clauses })))
 }
 
 /// Parse an if statement: `if expr block ['else' block]`.

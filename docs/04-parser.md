@@ -171,4 +171,120 @@ testable.
 
 ---
 
+## Actor extension
+
+MiniC is being extended with **concurrency based on the actor model**:
+programs are made of isolated *processes* that share no memory and interact
+only by exchanging messages. This first milestone covers **syntax, AST and
+parser only**; the type checker and interpreter reject the new constructs
+with an explicit `"... is not yet supported"` error (semantics and isolation
+come in milestone 2).
+
+### Grammar
+
+```
+program      := (fun_decl | process_decl)*          // any order
+process_decl := 'process' ident '(' params ')' block // no return type; body must be a block
+expr        += 'spawn' ident '(' args ')'           // evaluates to a pid
+             | 'self'                               // pid of the current process
+stmt        += 'send' expr '!' ident '(' args ')' ';'   // asynchronous
+             | 'receive' '{' clause+ '}'            // blocking; no ';'
+clause       := ident '(' params ')' '=>' block
+type        += 'pid' | 'pid[]' | 'pid[][]'
+```
+
+New reserved words: `process`, `spawn`, `send`, `receive`, `self`, `pid`.
+
+Example (`tests/fixtures/actor_counter.minic`):
+
+```c
+process counter(int start) {
+    int n = start;
+    bool running = true;
+    while running {
+        receive {
+            inc(int k) => { n = n + k; }
+            get(pid from) => { send from ! value(n); }
+            stop() => { running = false; }
+        }
+    }
+}
+
+void main() {
+    pid c = spawn counter(0);
+    send c ! inc(5);
+    send c ! get(self);
+    receive {
+        value(int v) => { print(v); }
+    }
+}
+```
+
+### AST (`src/ir/ast.rs`)
+
+| Construct                 | Node                                                  |
+|---------------------------|-------------------------------------------------------|
+| `pid` type                | `Type::Pid`                                           |
+| `spawn p(args)`           | `Expr::Spawn { process, args }`                       |
+| `self`                    | `Expr::SelfPid`                                       |
+| `tag(args)` in `send`     | `Message { tag, args }`                               |
+| `send e ! m(args);`       | `Statement::Send { target, message }`                 |
+| `receive { ... }`         | `Statement::Receive { clauses }`                      |
+| `tag(params) => { ... }`  | `ReceiveClause { tag, params, body }`                 |
+| `process p(params) {...}` | `ProcessDecl { name, params, body }`                  |
+| whole program             | `Program { functions, processes }`                    |
+
+### Parser modules
+
+```
+program.rs        ← many0(process_decl | fun_decl)
+  ├── processes.rs    ← process_decl (new)
+  └── functions.rs    ← fun_decl, type_name (+ pid), param_list (now shared)
+        └── statements.rs   ← + send_statement, receive_statement; block_statement now public
+              └── expressions.rs  ← + spawn_expr, self_expr (atoms)
+                    └── identifiers.rs  ← + keyword(), actor reserved words
+```
+
+### Design decisions
+
+**Keywords match whole words.** `keyword(kw)` is `tag(kw)` followed by
+`not(identifier-char)`. Without it, `spawner(1)` would be read as
+`spawn er(1)` and `selfish` as `self` + garbage. The new keywords are also
+added to `RESERVED`, so they cannot be used as identifiers, while prefixes
+such as `spawner`, `selfish`, `sender` remain valid names.
+
+**`send`'s `!` vs. `!=`.** The target of `send` is a full expression. The
+expression parser never consumes a lone infix `!` (only `!=`), so it stops
+right before the separator; the separator itself is parsed as `!` *not
+followed by* `=`. Hence `send a != b ! m();` sends `m()` to `a != b`, and
+`send p != m();` is a syntax error rather than being silently split.
+
+**Messages are tagged tuples.** A message is `tag(args)`, reusing the
+call-argument syntax (`parse_call`). A `receive` clause mirrors it with a
+parameter list, reusing `param_list` from `functions.rs` — the same rule
+used by functions and processes — so pattern matching is by tag, with typed
+bindings for the payload.
+
+**Processes have no return type and a block body.** A process is started
+with `spawn`, never called, so a return value would have nowhere to go.
+Requiring a block (unlike `fun_decl`, which accepts any statement) keeps it
+uniform with `receive` clauses, whose bodies are also blocks.
+
+**`receive` needs at least one clause and no `;`.** `many1` rejects
+`receive { }`, which would block forever. Like `if` and `while`, `receive`
+ends in `}` and needs no terminator.
+
+**Separate `processes` list.** `Program` keeps functions and processes in
+two vectors (each in source order) instead of a mixed list. Existing code
+that iterates `program.functions` keeps working unchanged, and later phases
+can register process names in their own namespace.
+
+**Later phases fail explicitly.** The type checker returns
+`TypeError("process declarations are not yet supported")` (and similar for
+`spawn`, `self`, `send`, `receive`); the interpreter does the same with
+`RuntimeError`. The TAC code generator already ends its matches with a
+catch-all arm, so it still compiles and is unaffected.
+
+---
+
 **What to read next →** [05-type-checker.md](05-type-checker.md)

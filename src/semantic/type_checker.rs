@@ -79,6 +79,10 @@ impl std::error::Error for TypeError {}
 /// Type-check a program. Returns `Ok(CheckedProgram)` if well-typed, `Err(TypeError)` on first error.
 /// Requires a `main` function with signature `void main()`.
 pub fn type_check(program: &UncheckedProgram) -> Result<CheckedProgram, TypeError> {
+    if !program.processes.is_empty() {
+        return Err(TypeError::new("process declarations are not yet supported"));
+    }
+
     let main_fn = program.main_function();
     match main_fn {
         None => return Err(TypeError::new("program must have a main function")),
@@ -117,7 +121,10 @@ pub fn type_check(program: &UncheckedProgram) -> Result<CheckedProgram, TypeErro
         let checked = type_check_fun_decl(f, &mut env, &fn_snapshot)?;
         functions.push(checked);
     }
-    Ok(Program { functions })
+    Ok(Program {
+        functions,
+        processes: Vec::new(),
+    })
 }
 
 fn type_check_fun_decl(
@@ -256,6 +263,10 @@ fn type_check_stmt(
                 Statement::Return(Some(Box::new(checked)))
             }
         },
+        Statement::Send { .. } => return Err(TypeError::new("send is not yet supported")),
+        Statement::Receive { .. } => {
+            return Err(TypeError::new("receive is not yet supported"))
+        }
     };
     Ok(StatementD {
         stmt,
@@ -416,6 +427,7 @@ fn type_check_expr_inner(
             base: Box::new(type_check_expr_to_typed(base, env)?),
             index: Box::new(type_check_expr_to_typed(index, env)?),
         }),
+        Expr::Spawn { .. } | Expr::SelfPid => Err(actor_expr_unsupported(e)),
     }
 }
 
@@ -543,6 +555,15 @@ fn type_check_expr(
                 Err(TypeError::new("indexed expression must be array"))
             }
         }
+        Expr::Spawn { .. } | Expr::SelfPid => Err(actor_expr_unsupported(&e.exp)),
+    }
+}
+
+/// Actor expressions parse but have no static semantics yet (milestone 2).
+fn actor_expr_unsupported(e: &Expr<()>) -> TypeError {
+    match e {
+        Expr::Spawn { .. } => TypeError::new("spawn is not yet supported"),
+        _ => TypeError::new("self is not yet supported"),
     }
 }
 

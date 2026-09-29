@@ -1,0 +1,34 @@
+void log(str who, int round) {
+    print(who);
+    print(round);
+}
+
+process pong() {
+    bool running = true;
+    while running {
+        receive {
+            ping(pid from, int round) => {
+                log("pong", round);
+                send from ! pong(self, round);
+            }
+            done() => { running = false; }
+        }
+    }
+}
+
+process ping(pid partner, int rounds) {
+    int i = 0;
+    while i < rounds {
+        send partner ! ping(self, i);
+        receive {
+            pong(pid from, int round) => { log("ping", round); }
+        }
+        i = i + 1;
+    }
+    send partner ! done();
+}
+
+void main() {
+    pid p = spawn pong();
+    pid q = spawn ping(p, 3);
+}

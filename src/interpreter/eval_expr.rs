@@ -147,6 +147,10 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
                 args.iter().map(|a| eval_expr(a, env)).collect();
             eval_call(name, arg_vals?, env)
         }
+
+        // --- Actor extension (semantics planned for milestone 2) ---
+        Expr::Spawn { .. } => Err(RuntimeError::new("spawn is not yet supported")),
+        Expr::SelfPid => Err(RuntimeError::new("self is not yet supported")),
     }
 }
 

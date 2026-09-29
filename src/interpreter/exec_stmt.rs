@@ -126,6 +126,10 @@ pub fn exec_stmt(stmt: &CheckedStmt, env: &mut Environment<Value>) -> ExecResult
             eval_call(name, arg_vals?, env)?;
             Ok(None)
         }
+
+        // --- Actor extension (semantics planned for milestone 2) ---
+        Statement::Send { .. } => Err(RuntimeError::new("send is not yet supported")),
+        Statement::Receive { .. } => Err(RuntimeError::new("receive is not yet supported")),
     }
 }
 

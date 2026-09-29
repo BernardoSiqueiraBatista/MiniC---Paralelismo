@@ -8,6 +8,10 @@
 //! * [`parse_call`] — parses a function call `name(arg, …)`; re-used by the
 //!   statement parser to handle call-statements.
 //!
+//! Actor extension: `spawn name(arg, …)` and `self` are atoms. Both keywords
+//! are matched as whole words (see [`keyword`]), so `spawner` or `selfish`
+//! still parse as ordinary identifiers.
+//!
 //! # Design Decisions
 //!
 //! ## Precedence via a parser chain
@@ -35,7 +39,7 @@
 //! right-associative trees.
 
 use crate::ir::ast::{Expr, ExprD, UncheckedExpr};
-use crate::parser::identifiers::identifier;
+use crate::parser::identifiers::{identifier, keyword};
 use crate::parser::literals::literal;
 use nom::{
     branch::alt,
@@ -49,6 +53,18 @@ use nom::{
 
 fn wrap(e: Expr<()>) -> UncheckedExpr {
     ExprD { exp: e, ty: () }
+}
+
+/// Parse a process spawn: `spawn identifier ( expr_list )`.
+fn spawn_expr(input: &str) -> IResult<&str, UncheckedExpr> {
+    let (rest, _) = preceded(multispace0, keyword("spawn"))(input)?;
+    let (rest, (process, args)) = parse_call(rest)?;
+    Ok((rest, wrap(Expr::Spawn { process, args })))
+}
+
+/// Parse `self`: the pid of the current process.
+fn self_expr(input: &str) -> IResult<&str, UncheckedExpr> {
+    map(preceded(multispace0, keyword("self")), |_| wrap(Expr::SelfPid))(input)
 }
 
 /// Parse a function call: `identifier ( expr_list )`. Returns (name, args).
@@ -65,9 +81,11 @@ pub fn parse_call(input: &str) -> IResult<&str, (String, Vec<UncheckedExpr>)> {
     Ok((rest, (name.to_string(), args)))
 }
 
-/// Atom: literal, call, array literal, identifier, or parenthesized expression.
+/// Atom: spawn, self, literal, call, array literal, identifier, or parenthesized expression.
 fn atom(input: &str) -> IResult<&str, UncheckedExpr> {
     alt((
+        spawn_expr,
+        self_expr,
         map(literal, |l| wrap(Expr::Literal(l.into()))),
         map(parse_call, |(name, args)| wrap(Expr::Call { name, args })),
         map(

@@ -63,6 +63,10 @@ use value::{FnValue, RuntimeError, Value};
 
 /// Interpret a type-checked MiniC program, starting execution at `main`.
 pub fn interpret(program: &CheckedProgram) -> Result<(), RuntimeError> {
+    if !program.processes.is_empty() {
+        return Err(RuntimeError::new("process declarations are not yet supported"));
+    }
+
     let mut env = Environment::<Value>::new();
 
     // Register native stdlib functions as Value::Fn(FnValue::Native) bindings.

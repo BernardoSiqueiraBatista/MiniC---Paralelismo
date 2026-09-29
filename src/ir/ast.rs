@@ -11,7 +11,10 @@
 //! * [`Statement`] / [`StatementD`] — statements (declarations, assignments,
 //!   `if`, `while`, `return`, blocks).
 //! * [`FunDecl`] — a single function declaration with its body.
-//! * [`Program`] — the top-level container: a list of function declarations.
+//! * [`ProcessDecl`] — a process (actor) declaration: `process name(params) { … }`.
+//! * [`Message`] / [`ReceiveClause`] — the message sent by `send` and the
+//!   pattern clauses of `receive` (actor extension).
+//! * [`Program`] — the top-level container: function and process declarations.
 //!
 //! Convenience type aliases pin the `Ty` parameter to either `()` or `Type`:
 //! `UncheckedExpr`, `CheckedExpr`, `UncheckedProgram`, `CheckedProgram`, etc.
@@ -58,6 +61,8 @@ pub enum Type {
     Str,
     Array(Box<Type>),
     Fun(Vec<Type>, Box<Type>),
+    /// Process identifier returned by `spawn` and `self` (actor extension).
+    Pid,
     /// Matches any type. Only used as a parameter type in native stdlib registrations.
     Any,
 }
@@ -112,6 +117,28 @@ pub enum Expr<Ty> {
         base: Box<ExprD<Ty>>,
         index: Box<ExprD<Ty>>,
     },
+    /// Process creation: `spawn name(args)`. Evaluates to the new process' pid.
+    Spawn {
+        process: String,
+        args: Vec<ExprD<Ty>>,
+    },
+    /// `self`: the pid of the currently running process.
+    SelfPid,
+}
+
+/// A message: `tag(args)`. Built by `send`, matched by `receive` clauses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Message<Ty> {
+    pub tag: String,
+    pub args: Vec<ExprD<Ty>>,
+}
+
+/// A `receive` clause: `tag(params) => block`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReceiveClause<Ty> {
+    pub tag: String,
+    pub params: Vec<Param>,
+    pub body: Box<StatementD<Ty>>,
 }
 
 /// Statement with type decoration.
@@ -153,6 +180,15 @@ pub enum Statement<Ty> {
     },
     /// Return statement: `return [expr]`.
     Return(Option<Box<ExprD<Ty>>>),
+    /// Asynchronous message send: `send target ! tag(args);`.
+    Send {
+        target: Box<ExprD<Ty>>,
+        message: Message<Ty>,
+    },
+    /// Blocking receive: `receive { tag(params) => block ... }`.
+    Receive {
+        clauses: Vec<ReceiveClause<Ty>>,
+    },
 }
 
 /// A typed parameter: (name, type).
@@ -167,10 +203,20 @@ pub struct FunDecl<Ty> {
     pub body: Box<StatementD<Ty>>,
 }
 
-/// A complete MiniC program: function declarations only. Execution starts at `main`.
+/// A process (actor) declaration: `process name(params) { ... }`.
+/// Processes have no return type and their body is always a block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessDecl<Ty> {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub body: Box<StatementD<Ty>>,
+}
+
+/// A complete MiniC program: function and process declarations. Execution starts at `main`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program<Ty> {
     pub functions: Vec<FunDecl<Ty>>,
+    pub processes: Vec<ProcessDecl<Ty>>,
 }
 
 impl<Ty> Program<Ty> {
@@ -186,5 +232,7 @@ pub type UncheckedStmt = StatementD<()>;
 pub type CheckedStmt = StatementD<Type>;
 pub type UncheckedFunDecl = FunDecl<()>;
 pub type CheckedFunDecl = FunDecl<Type>;
+pub type UncheckedProcessDecl = ProcessDecl<()>;
+pub type CheckedProcessDecl = ProcessDecl<Type>;
 pub type UncheckedProgram = Program<()>;
 pub type CheckedProgram = Program<Type>;
