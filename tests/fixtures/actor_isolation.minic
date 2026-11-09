@@ -1,0 +1,15 @@
+process worker(int[] local_copy, pid parent) {
+    local_copy[0] = 99;
+    send parent ! child_first(local_copy[0]);
+}
+
+void main() {
+    int[] arr = [10, 20];
+    print(self);
+    pid w = spawn worker(arr, self);
+    print(w);
+    receive {
+        child_first(int x) => { print(x); }
+    }
+    print(arr[0]);
+}

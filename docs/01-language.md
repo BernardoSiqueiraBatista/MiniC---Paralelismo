@@ -8,7 +8,7 @@ the implementation is needed here.
 
 ## Types
 
-MiniC has six types:
+MiniC has seven types:
 
 | Type | Description | Example values |
 |------|-------------|----------------|
@@ -16,6 +16,7 @@ MiniC has six types:
 | `float` | 64-bit floating-point number | `3.14`, `-0.5`, `1.0` |
 | `bool` | Boolean | `true`, `false` |
 | `str` | Text string | `"hello"`, `"world"` |
+| `pid` | Process identifier (actor address) | `self`, `spawn counter(0)` |
 | `void` | No value; used only as a function return type | — |
 | `T[]` | Array of elements of type `T` | `[1, 2, 3]`, `[true, false]` |
 
@@ -235,6 +236,45 @@ Notice:
 - The body of `factorial` is a single `if` statement (no braces needed for a
   single statement).
 - `main` uses a block so it can have two statements.
+
+---
+
+## Actor Processes and Message Passing
+
+MiniC supports concurrency via the **actor model**. Programs can declare
+isolated `process` definitions that share no mutable memory and communicate
+exclusively by sending and receiving tagged messages:
+
+```c
+process counter(int start) {
+  int n = start;
+  bool running = true;
+  while running {
+    receive {
+      inc(int k) => { n = n + k; }
+      get(pid from) => { send from ! value(n); }
+      stop() => { running = false; }
+    }
+  }
+}
+
+void main() {
+  pid c = spawn counter(0);
+  send c ! inc(5);
+  send c ! inc(2);
+  send c ! get(self);
+  receive {
+    value(int v) => { print(v); }
+  }
+  send c ! stop();
+}
+```
+
+- `process name(params) { ... }` declares an actor process (no return type).
+- `spawn name(args)` starts a new concurrent process and evaluates to its `pid`.
+- `self` evaluates to the `pid` of the currently executing process (`<pid 0>` for `main`).
+- `send target ! tag(args);` asynchronously copies `args` and appends `tag(args)` to `target`'s mailbox.
+- `receive { tag(params) => { ... } ... }` selectively consumes the oldest matching message in the current process's mailbox, suspending the process without busy-waiting until a matching message arrives.
 
 ---
 

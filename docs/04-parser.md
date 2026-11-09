@@ -173,12 +173,11 @@ testable.
 
 ## Actor extension
 
-MiniC is being extended with **concurrency based on the actor model**:
+MiniC is extended with **concurrency based on the actor model**:
 programs are made of isolated *processes* that share no memory and interact
-only by exchanging messages. This first milestone covers **syntax, AST and
-parser only**; the type checker and interpreter reject the new constructs
-with an explicit `"... is not yet supported"` error (semantics and isolation
-come in milestone 2).
+only by exchanging messages. This section covers **syntax, AST and parser**;
+static typing and runtime execution are described in
+[05-type-checker.md](05-type-checker.md) and [06-interpreter.md](06-interpreter.md).
 
 ### Grammar
 
@@ -277,13 +276,7 @@ ends in `}` and needs no terminator.
 **Separate `processes` list.** `Program` keeps functions and processes in
 two vectors (each in source order) instead of a mixed list. Existing code
 that iterates `program.functions` keeps working unchanged, and later phases
-can register process names in their own namespace.
-
-**Later phases fail explicitly.** The type checker returns
-`TypeError("process declarations are not yet supported")` (and similar for
-`spawn`, `self`, `send`, `receive`); the interpreter does the same with
-`RuntimeError`. The TAC code generator already ends its matches with a
-catch-all arm, so it still compiles and is unaffected.
+can register process names in the top-level symbol table.
 
 ---
 

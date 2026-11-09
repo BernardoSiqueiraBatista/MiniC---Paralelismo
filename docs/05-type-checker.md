@@ -155,4 +155,29 @@ short and students typically fix one error at a time.
 
 ---
 
+## Actor Extension: Process Types and Message Protocol Table
+
+To type-check actor constructs statically without requiring parameterized `pid`
+types in the surface syntax:
+
+1. **Top-level uniqueness and `Type::Process`.** Functions and processes share
+   one top-level namespace. Each `process p(T1 x1, ...)` is registered in
+   `Environment<Type>` as `Type::Process(vec![T1, ...])`. Calling a process as
+   a function or spawning a function is rejected statically.
+2. **`self` and `spawn`.** `self` always has type `Type::Pid`. `spawn p(args)`
+   checks that `p` resolves to `Type::Process(param_tys)`, validates arity and
+   argument compatibility (`types_compatible`), and produces `Type::Pid`.
+3. **Global message protocol (`MessageTable`).** Before checking bodies, a
+   pre-pass collects all `receive` clauses across functions and processes into a
+   map `tag -> Vec<Type>`. If two clauses declare the same `tag` with different
+   parameter types, type checking fails. Every `send target ! tag(args);` must:
+   - have `target` of type `Type::Pid`;
+   - reference a `tag` present in the protocol table;
+   - pass arguments compatible with that `tag`'s parameter types.
+4. **`receive` clauses.** Clauses within a single `receive` must have distinct
+   tags and non-void, non-duplicate, non-shadowing parameters. Each clause body
+   is checked in a snapshot scope with its parameters bound.
+
+---
+
 **What to read next →** [06-interpreter.md](06-interpreter.md)

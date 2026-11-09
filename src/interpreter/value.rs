@@ -5,12 +5,12 @@
 //! Defines the types that the interpreter works with at runtime:
 //!
 //! * [`Value`] — a runtime value: an integer, float, boolean, string, array,
-//!   void, or function.
+//!   process identifier (`Pid`), void, or function.
 //! * [`FnValue`] — the two kinds of callable: a user-defined MiniC function
 //!   or a native Rust function.
 //! * [`NativeFn`] — a type alias for the signature of a native function.
 //! * [`RuntimeError`] — an error produced during interpretation (e.g.,
-//!   division by zero, out-of-bounds array access, undefined variable).
+//!   division by zero, out-of-bounds array access, deadlock).
 //!
 //! # Design Decisions
 //!
@@ -26,13 +26,14 @@
 //! Value::Bool(true)       — a boolean
 //! Value::Str("hi")        — a string
 //! Value::Array([...])     — a list of Values
+//! Value::Pid(1)           — a process identifier (actor extension)
 //! Value::Void             — no value (returned by void functions)
 //! Value::Fn(FnValue::...) — a callable function
 //! ```
 //!
-//! This is the idiomatic Rust approach to *tagged unions* — a value that can
-//! be one of several shapes. Using `match` on a `Value` forces the code to
-//! handle every possible shape, which prevents runtime surprises.
+//! Because every variant owns its data (`Vec<Value>`, `String`, `u64`) and
+//! implements `Clone`, passing values in `spawn` or `send` performs a deep
+//! copy automatically, guaranteeing actor memory isolation.
 //!
 //! ## `FnValue` unifying user-defined and native functions
 //!
@@ -45,20 +46,15 @@
 //!   reference to a specific Rust function. Calling it just calls that Rust
 //!   function directly.
 //!
-//! Storing both in the same `Value::Fn` variant means the call site in
-//! `eval_expr` does not need to know in advance whether a function is
-//! user-defined or native — `match` handles the dispatch.
-//!
 //! ## `NativeFn` as a function pointer type
 //!
 //! ```rust,ignore
 //! pub type NativeFn = fn(Vec<Value>) -> Result<Value, RuntimeError>;
 //! ```
 //!
-//! `NativeFn` is a *function pointer type*: a variable of this type holds
-//! the address of a Rust function with the matching signature. It is defined
-//! here (rather than in `stdlib`) to avoid a circular dependency: `stdlib`
-//! needs `Value`, and `Value` needs to reference the callable type.
+//! `NativeFn` is defined here (rather than in `stdlib`) to avoid a circular
+//! dependency: `stdlib` needs `Value`, and `Value` needs to reference the
+//! callable type.
 
 use std::fmt;
 
@@ -101,6 +97,7 @@ pub enum Value {
     Bool(bool),
     Str(String),
     Array(Vec<Value>),
+    Pid(u64),
     Void,
     Fn(FnValue),
 }
@@ -112,6 +109,7 @@ impl fmt::Display for Value {
             Value::Float(x) => write!(f, "{}", x),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Str(s) => write!(f, "{}", s),
+            Value::Pid(p) => write!(f, "<pid {}>", p),
             Value::Void => write!(f, "void"),
             Value::Array(elems) => {
                 write!(f, "[")?;
@@ -132,12 +130,23 @@ impl fmt::Display for Value {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeError {
     pub message: String,
+    /// Internal marker used to unwind idle child processes quietly on quiescence.
+    pub shutdown: bool,
 }
 
 impl RuntimeError {
     pub fn new(msg: impl Into<String>) -> Self {
         Self {
             message: msg.into(),
+            shutdown: false,
+        }
+    }
+
+    /// Construct an internal shutdown signal used to stop idle processes on quiescence.
+    pub fn shutdown() -> Self {
+        Self {
+            message: "process stopped by runtime shutdown".to_string(),
+            shutdown: true,
         }
     }
 }

@@ -1,0 +1,5 @@
+void main() {
+    receive {
+        never_arrives(int x) => { print(x); }
+    }
+}

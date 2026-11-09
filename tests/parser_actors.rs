@@ -310,18 +310,13 @@ fn test_fixture_actor_pingpong() {
     assert_eq!(prog.functions.len(), 2);
 }
 
-// --- later phases reject the new constructs explicitly ---
+// --- parsed actor fixtures pass type checking ---
 
 #[test]
-fn test_type_checker_rejects_processes() {
-    let prog = parse_program_file("actor_counter.minic");
-    let err = mini_c::semantic::type_check(&prog).unwrap_err();
-    assert!(err.message.contains("not yet supported"), "{}", err.message);
-}
+fn test_type_checker_accepts_actor_fixtures() {
+    let counter = parse_program_file("actor_counter.minic");
+    assert!(mini_c::semantic::type_check(&counter).is_ok());
 
-#[test]
-fn test_type_checker_rejects_actor_statements() {
-    let (_, prog) = program("void main() { send self ! m(); }").unwrap();
-    let err = mini_c::semantic::type_check(&prog).unwrap_err();
-    assert!(err.message.contains("not yet supported"), "{}", err.message);
+    let pingpong = parse_program_file("actor_pingpong.minic");
+    assert!(mini_c::semantic::type_check(&pingpong).is_ok());
 }

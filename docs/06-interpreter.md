@@ -163,4 +163,43 @@ small programs, simplicity matters more than speed.
 
 ---
 
+## Actor Runtime (`src/interpreter/runtime.rs`)
+
+### Real OS threads and isolated environments
+
+Each process runs on its own OS thread (`main` is `pid 0`; spawned processes
+receive `1, 2, ...`) with its own `Environment<Value>` initialized with stdlib
+and user-defined functions. Arguments passed to `spawn` and `send` are cloned
+(`Value::Clone` deep-copies arrays and strings), ensuring complete memory
+isolation.
+
+### Zero busy-waiting via per-process `Condvar`
+
+Processes never spin-wait on their mailboxes:
+
+- Every process owns a dedicated `Arc<Condvar>` alongside its `VecDeque`
+  mailbox inside `Runtime`.
+- `receive` scans the mailbox from oldest to newest for a message whose tag
+  matches any clause (*selective receive*). Unmatched messages remain queued.
+- When no matching message is present, the process sets its status to
+  `Waiting(tags)` and sleeps in the OS kernel via `cond.wait(guard)`.
+- `send` appends the message to the recipient's mailbox and checks whether the
+  recipient is `Waiting` on that message's tag. Only then does `send` mark the
+  recipient `Running` and wake **that specific process** via `cond.notify_one()`.
+  Messages to already-finished processes are silently discarded.
+
+### Quiescence, idle servers, and deadlock detection
+
+When every alive process is blocked in `receive` with no matching message in
+its mailbox (`waiting == alive`), no process can make further progress:
+
+- If `main` (`pid 0`) is still waiting, the runtime reports a deadlock
+  `RuntimeError` (exit code `1`).
+- If `main` has already finished, any remaining blocked processes are idle
+  servers and are shut down silently (exit code `0`).
+- If any child process terminates with a runtime error, the error is printed to
+  `stderr` and `interpret` returns an error once all threads join (exit code `1`).
+
+---
+
 **What to read next →** [07-stdlib.md](07-stdlib.md)

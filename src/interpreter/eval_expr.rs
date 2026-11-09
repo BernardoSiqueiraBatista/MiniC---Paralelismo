@@ -4,9 +4,8 @@
 //!
 //! Exposes two public functions:
 //!
-//! * [`eval_expr`] — recursively evaluates a [`CheckedExpr`] to a [`Value`].
-//!   This is the workhorse of the interpreter: every operator, literal,
-//!   identifier lookup, array construction, and index access is handled here.
+//! * [`eval_expr`] — recursively evaluates a [`CheckedExpr`] to a [`Value`]
+//!   within the current process context ([`ProcCtx`]).
 //! * [`eval_call`] — dispatches a function call by name. Called both from
 //!   `eval_expr` (when a call appears inside an expression) and from
 //!   `exec_stmt` (when a call is used as a statement).
@@ -17,36 +16,33 @@
 //!
 //! `eval_expr` is a recursive function: to evaluate `Add(left, right)`, it
 //! calls itself on `left` and `right`, then adds the resulting `Value`s.
-//! This mirrors the recursive structure of the AST and is the defining
-//! characteristic of tree-walking interpretation. Each AST node type has a
-//! corresponding `match` arm.
 //!
 //! ## Short-circuit evaluation for `and` / `or`
 //!
 //! `and` and `or` do *not* eagerly evaluate both operands. For `and`, if the
 //! left side is `false` the right side is never evaluated; for `or`, if the
-//! left side is `true` the right side is skipped. This matches the behaviour
-//! of these operators in most languages and is implemented simply by
-//! returning early inside the `match` arm rather than calling `eval_expr` on
-//! the second operand unconditionally.
+//! left side is `true` the right side is skipped.
 //!
 //! ## Function call scoping via `snapshot` / `restore`
 //!
 //! When `eval_call` calls a user-defined function, it snapshots the entire
-//! environment, binds the arguments to the parameter names, runs the body,
-//! then restores the snapshot. This gives the callee its own scope while
-//! automatically cleaning up afterward — no matter whether the function
-//! returns normally or early. See [`Environment`]
-//! for more detail on this mechanism.
+//! environment, binds the arguments to the parameter names, runs the body
+//! (passing the caller's [`ProcCtx`] so `self`, `spawn`, `send`, and `receive`
+//! operate on the calling process), then restores the snapshot.
 
 use crate::environment::Environment;
 use crate::ir::ast::{CheckedExpr, Expr, Literal};
 
 use super::exec_stmt::exec_stmt;
+use super::runtime::ProcCtx;
 use super::value::{FnValue, RuntimeError, Value};
 
 /// Evaluate a checked expression to a runtime value.
-pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Value, RuntimeError> {
+pub fn eval_expr(
+    expr: &CheckedExpr,
+    env: &mut Environment<Value>,
+    ctx: &ProcCtx,
+) -> Result<Value, RuntimeError> {
     match &expr.exp {
         Expr::Literal(lit) => Ok(eval_literal(lit)),
 
@@ -55,8 +51,8 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
             .cloned()
             .ok_or_else(|| RuntimeError::new(format!("undefined variable '{}'", name))),
 
-        Expr::Neg(inner) => match eval_expr(inner, env)? {
-            Value::Int(n) => Ok(Value::Int(-n)),
+        Expr::Neg(inner) => match eval_expr(inner, env, ctx)? {
+            Value::Int(n) => Ok(Value::Int(n.wrapping_neg())),
             Value::Float(x) => Ok(Value::Float(-x)),
             v => Err(RuntimeError::new(format!(
                 "cannot negate non-numeric value: {}",
@@ -64,28 +60,63 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
             ))),
         },
 
-        Expr::Add(l, r) => numeric_binop(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a + b, |a, b| a + b),
-        Expr::Sub(l, r) => numeric_binop(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a - b, |a, b| a - b),
-        Expr::Mul(l, r) => numeric_binop(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a * b, |a, b| a * b),
-        Expr::Div(l, r) => numeric_binop(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a / b, |a, b| a / b),
+        Expr::Add(l, r) => numeric_binop(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a.wrapping_add(b),
+            |a, b| a + b,
+        ),
+        Expr::Sub(l, r) => numeric_binop(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a.wrapping_sub(b),
+            |a, b| a - b,
+        ),
+        Expr::Mul(l, r) => numeric_binop(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a.wrapping_mul(b),
+            |a, b| a * b,
+        ),
+        Expr::Div(l, r) => numeric_div(eval_expr(l, env, ctx)?, eval_expr(r, env, ctx)?),
 
-        Expr::Lt(l, r) => numeric_cmp(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a < b, |a, b| a < b),
-        Expr::Le(l, r) => numeric_cmp(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a <= b, |a, b| a <= b),
-        Expr::Gt(l, r) => numeric_cmp(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a > b, |a, b| a > b),
-        Expr::Ge(l, r) => numeric_cmp(eval_expr(l, env)?, eval_expr(r, env)?, |a, b| a >= b, |a, b| a >= b),
+        Expr::Lt(l, r) => numeric_cmp(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a < b,
+            |a, b| a < b,
+        ),
+        Expr::Le(l, r) => numeric_cmp(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a <= b,
+            |a, b| a <= b,
+        ),
+        Expr::Gt(l, r) => numeric_cmp(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a > b,
+            |a, b| a > b,
+        ),
+        Expr::Ge(l, r) => numeric_cmp(
+            eval_expr(l, env, ctx)?,
+            eval_expr(r, env, ctx)?,
+            |a, b| a >= b,
+            |a, b| a >= b,
+        ),
 
         Expr::Eq(l, r) => {
-            let lv = eval_expr(l, env)?;
-            let rv = eval_expr(r, env)?;
+            let lv = eval_expr(l, env, ctx)?;
+            let rv = eval_expr(r, env, ctx)?;
             Ok(Value::Bool(values_equal(&lv, &rv)))
         }
         Expr::Ne(l, r) => {
-            let lv = eval_expr(l, env)?;
-            let rv = eval_expr(r, env)?;
+            let lv = eval_expr(l, env, ctx)?;
+            let rv = eval_expr(r, env, ctx)?;
             Ok(Value::Bool(!values_equal(&lv, &rv)))
         }
 
-        Expr::Not(inner) => match eval_expr(inner, env)? {
+        Expr::Not(inner) => match eval_expr(inner, env, ctx)? {
             Value::Bool(b) => Ok(Value::Bool(!b)),
             v => Err(RuntimeError::new(format!(
                 "expected bool for '!', got: {}",
@@ -93,10 +124,10 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
             ))),
         },
         Expr::And(l, r) => {
-            let lv = eval_expr(l, env)?;
+            let lv = eval_expr(l, env, ctx)?;
             match lv {
                 Value::Bool(false) => Ok(Value::Bool(false)),
-                Value::Bool(true) => eval_expr(r, env),
+                Value::Bool(true) => eval_expr(r, env, ctx),
                 v => Err(RuntimeError::new(format!(
                     "expected bool for 'and', got: {}",
                     v
@@ -104,10 +135,10 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
             }
         }
         Expr::Or(l, r) => {
-            let lv = eval_expr(l, env)?;
+            let lv = eval_expr(l, env, ctx)?;
             match lv {
                 Value::Bool(true) => Ok(Value::Bool(true)),
-                Value::Bool(false) => eval_expr(r, env),
+                Value::Bool(false) => eval_expr(r, env, ctx),
                 v => Err(RuntimeError::new(format!(
                     "expected bool for 'or', got: {}",
                     v
@@ -117,19 +148,22 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
 
         Expr::ArrayLit(elems) => {
             let vals: Result<Vec<Value>, RuntimeError> =
-                elems.iter().map(|e| eval_expr(e, env)).collect();
+                elems.iter().map(|e| eval_expr(e, env, ctx)).collect();
             Ok(Value::Array(vals?))
         }
 
         Expr::Index { base, index } => {
-            let base_val = eval_expr(base, env)?;
-            let idx_val = eval_expr(index, env)?;
+            let base_val = eval_expr(base, env, ctx)?;
+            let idx_val = eval_expr(index, env, ctx)?;
             match (base_val, idx_val) {
-                (Value::Array(elems), Value::Int(i)) => {
+                (Value::Array(elems), Value::Int(i)) if i >= 0 => {
                     let i = i as usize;
                     elems.into_iter().nth(i).ok_or_else(|| {
                         RuntimeError::new(format!("array index {} out of bounds", i))
                     })
+                }
+                (Value::Array(_), Value::Int(i)) => {
+                    Err(RuntimeError::new(format!("array index {} out of bounds", i)))
                 }
                 (Value::Array(_), idx) => Err(RuntimeError::new(format!(
                     "array index must be int, got: {}",
@@ -144,13 +178,18 @@ pub fn eval_expr(expr: &CheckedExpr, env: &mut Environment<Value>) -> Result<Val
 
         Expr::Call { name, args } => {
             let arg_vals: Result<Vec<Value>, RuntimeError> =
-                args.iter().map(|a| eval_expr(a, env)).collect();
-            eval_call(name, arg_vals?, env)
+                args.iter().map(|a| eval_expr(a, env, ctx)).collect();
+            eval_call(name, arg_vals?, env, ctx)
         }
 
-        // --- Actor extension (semantics planned for milestone 2) ---
-        Expr::Spawn { .. } => Err(RuntimeError::new("spawn is not yet supported")),
-        Expr::SelfPid => Err(RuntimeError::new("self is not yet supported")),
+        Expr::Spawn { process, args } => {
+            let arg_vals: Result<Vec<Value>, RuntimeError> =
+                args.iter().map(|a| eval_expr(a, env, ctx)).collect();
+            let pid = ctx.rt.spawn(process, arg_vals?)?;
+            Ok(Value::Pid(pid))
+        }
+
+        Expr::SelfPid => Ok(Value::Pid(ctx.pid)),
     }
 }
 
@@ -159,6 +198,7 @@ pub fn eval_call(
     name: &str,
     args: Vec<Value>,
     env: &mut Environment<Value>,
+    ctx: &ProcCtx,
 ) -> Result<Value, RuntimeError> {
     match env.get(name).cloned() {
         Some(Value::Fn(FnValue::Native(f))) => (f)(args),
@@ -172,12 +212,12 @@ pub fn eval_call(
                 )));
             }
             let snapshot = env.snapshot();
-            for ((param_name, _), val) in decl.params.iter().zip(args.into_iter()) {
+            for ((param_name, _), val) in decl.params.iter().zip(args) {
                 env.declare(param_name.clone(), val);
             }
-            let result = exec_stmt(&decl.body, env)?;
+            let result = exec_stmt(&decl.body, env, ctx);
             env.restore(snapshot);
-            Ok(result.unwrap_or(Value::Void))
+            Ok(result?.unwrap_or(Value::Void))
         }
         Some(_) => Err(RuntimeError::new(format!("'{}' is not a function", name))),
         None => Err(RuntimeError::new(format!("undefined function '{}'", name))),
@@ -213,6 +253,22 @@ fn numeric_binop(
     }
 }
 
+fn numeric_div(lv: Value, rv: Value) -> Result<Value, RuntimeError> {
+    match (lv, rv) {
+        (Value::Int(_), Value::Int(0)) => Err(RuntimeError::new("division by zero")),
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.wrapping_div(b))),
+        (_, Value::Float(b)) if b == 0.0 => Err(RuntimeError::new("division by zero")),
+        (_, Value::Int(0)) => Err(RuntimeError::new("division by zero")),
+        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((a as f64) / b)),
+        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / (b as f64))),
+        (l, r) => Err(RuntimeError::new(format!(
+            "arithmetic requires numeric operands, got: {} and {}",
+            l, r
+        ))),
+    }
+}
+
 fn numeric_cmp(
     lv: Value,
     rv: Value,
@@ -239,6 +295,10 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Pid(x), Value::Pid(y)) => x == y,
+        (Value::Array(xs), Value::Array(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| values_equal(x, y))
+        }
         _ => false,
     }
 }

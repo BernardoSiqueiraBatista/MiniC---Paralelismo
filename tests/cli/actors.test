@@ -1,0 +1,43 @@
+# --check accepts valid actor fixtures
+$ ./target/debug/mini_c --check tests/fixtures/actor_counter.minic
+'tests/fixtures/actor_counter.minic' is well-typed.
+>=0
+
+# --check rejects sending a message tag that no process receives
+$ ./target/debug/mini_c --check tests/fixtures/actor_bad_message.minic
+>2 /never received/
+>=1
+
+# --run executes the stateful counter actor (0 + 5 + 2 = 7)
+$ ./target/debug/mini_c --run tests/fixtures/actor_counter.minic
+7
+>=0
+
+# --run executes the causal ping-pong actor exchange deterministically
+$ ./target/debug/mini_c --run tests/fixtures/actor_pingpong.minic
+pong
+0
+ping
+0
+pong
+1
+ping
+1
+pong
+2
+ping
+2
+>=0
+
+# --run formats pids as <pid N> and isolates array state across processes
+$ ./target/debug/mini_c --run tests/fixtures/actor_isolation.minic
+<pid 0>
+<pid 1>
+99
+10
+>=0
+
+# --run detects deadlock when main blocks on a message that can never arrive
+$ ./target/debug/mini_c --run tests/fixtures/actor_deadlock.minic
+>2 /deadlock/
+>=1

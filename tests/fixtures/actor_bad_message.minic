@@ -1,0 +1,10 @@
+process worker() {
+    receive {
+        known(int x) => { print(x); }
+    }
+}
+
+void main() {
+    pid w = spawn worker();
+    send w ! unknown(1);
+}

@@ -63,6 +63,8 @@ pub enum Type {
     Fun(Vec<Type>, Box<Type>),
     /// Process identifier returned by `spawn` and `self` (actor extension).
     Pid,
+    /// Process signature stored in the type environment (never produced by the parser).
+    Process(Vec<Type>),
     /// Matches any type. Only used as a parameter type in native stdlib registrations.
     Any,
 }
