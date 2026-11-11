@@ -33,7 +33,7 @@
 use crate::environment::Environment;
 use crate::ir::ast::{CheckedExpr, Expr, Literal};
 
-use super::exec_stmt::exec_stmt;
+use super::exec_stmt::{exec_stmt, Flow};
 use super::runtime::ProcCtx;
 use super::value::{FnValue, RuntimeError, Value};
 
@@ -217,7 +217,15 @@ pub fn eval_call(
             }
             let result = exec_stmt(&decl.body, env, ctx);
             env.restore(snapshot);
-            Ok(result?.unwrap_or(Value::Void))
+            match result? {
+                Flow::Return(v) => Ok(v),
+                Flow::Normal => Ok(Value::Void),
+                // Rejected statically: only processes may recurse with `Recur`.
+                Flow::Recur(_) => Err(RuntimeError::new(format!(
+                    "function '{}' cannot restart a process",
+                    name
+                ))),
+            }
         }
         Some(_) => Err(RuntimeError::new(format!("'{}' is not a function", name))),
         None => Err(RuntimeError::new(format!("undefined function '{}'", name))),

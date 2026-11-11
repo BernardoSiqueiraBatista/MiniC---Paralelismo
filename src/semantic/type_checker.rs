@@ -235,7 +235,91 @@ fn collect_messages(s: &UncheckedStmt, table: &mut MessageTable) -> Result<(), T
         | Statement::Assign { .. }
         | Statement::Call { .. }
         | Statement::Return(_)
+        | Statement::Send { .. }
+        | Statement::Recur { .. } => Ok(()),
+    }
+}
+
+/// Verify that every `Recur` (self-call of a process) is in tail position:
+/// it must be the last statement executed by the process body.
+///
+/// Tail position propagates into the last statement of a block, both
+/// branches of an `if`, and every clause body of a `receive`. It never
+/// propagates into a `while` body, since the loop would run again afterwards.
+/// This guarantees that the runtime can restart the process instead of
+/// nesting calls, so a server can loop forever without growing the stack.
+fn check_tail_recursion(s: &CheckedStmt, in_tail: bool, process: &str) -> Result<(), TypeError> {
+    match &s.stmt {
+        Statement::Recur { .. } if !in_tail => Err(TypeError::new(format!(
+            "recursive call to process '{}' must be its last statement (tail position)",
+            process
+        ))),
+        Statement::Block { seq } => {
+            let last = seq.len().saturating_sub(1);
+            seq.iter()
+                .enumerate()
+                .try_for_each(|(i, st)| check_tail_recursion(st, in_tail && i == last, process))
+        }
+        Statement::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            check_tail_recursion(then_branch, in_tail, process)?;
+            if let Some(eb) = else_branch {
+                check_tail_recursion(eb, in_tail, process)?;
+            }
+            Ok(())
+        }
+        Statement::While { body, .. } => check_tail_recursion(body, false, process),
+        Statement::Receive { clauses } => clauses
+            .iter()
+            .try_for_each(|c| check_tail_recursion(&c.body, in_tail, process)),
+        Statement::Recur { .. }
+        | Statement::Decl { .. }
+        | Statement::Assign { .. }
+        | Statement::Call { .. }
+        | Statement::Return(_)
         | Statement::Send { .. } => Ok(()),
+    }
+}
+
+/// Check arity and argument types of a process instantiation (`spawn p(args)`
+/// or a tail-recursive `p(args);` inside process `p`).
+fn check_process_args(
+    process: &str,
+    args: &[CheckedExpr],
+    env: &Environment<Type>,
+) -> Result<(), TypeError> {
+    match env.get(process) {
+        Some(Type::Process(param_tys)) => {
+            if args.len() != param_tys.len() {
+                return Err(TypeError::new(format!(
+                    "process '{}' expects {} arguments, got {}",
+                    process,
+                    param_tys.len(),
+                    args.len()
+                )));
+            }
+            for (i, (arg, param_ty)) in args.iter().zip(param_tys.iter()).enumerate() {
+                if !types_compatible(&arg.ty, param_ty) {
+                    return Err(TypeError::new(format!(
+                        "argument {} to process {}: expected {:?}, got {:?}",
+                        i + 1,
+                        process,
+                        param_ty,
+                        arg.ty
+                    )));
+                }
+            }
+            Ok(())
+        }
+        Some(Type::Fun(_, _)) => Err(TypeError::new(format!(
+            "'{}' is a function, not a process; call it directly",
+            process
+        ))),
+        Some(_) => Err(TypeError::new(format!("'{}' is not a process", process))),
+        None => Err(TypeError::new(format!("undefined process: {}", process))),
     }
 }
 
@@ -263,7 +347,7 @@ fn type_check_fun_decl(
         }
         env.declare(name.clone(), ty.clone());
     }
-    let body = type_check_stmt(&f.body, env, &f.return_type, msgs)?;
+    let body = type_check_stmt(&f.body, env, &f.return_type, msgs, None)?;
     Ok(FunDecl {
         name: f.name.clone(),
         params: f.params.clone(),
@@ -295,7 +379,8 @@ fn type_check_process_decl(
         }
         env.declare(name.clone(), ty.clone());
     }
-    let body = type_check_stmt(&p.body, env, &Type::Unit, msgs)?;
+    let body = type_check_stmt(&p.body, env, &Type::Unit, msgs, Some(&p.name))?;
+    check_tail_recursion(&body, true, &p.name)?;
     Ok(ProcessDecl {
         name: p.name.clone(),
         params: p.params.clone(),
@@ -308,6 +393,7 @@ fn type_check_stmt(
     env: &mut Environment<Type>,
     expected_return: &Type,
     msgs: &MessageTable,
+    current_process: Option<&str>,
 ) -> Result<CheckedStmt, TypeError> {
     let stmt = match &s.stmt {
         Statement::Decl { name, ty, init } => {
@@ -343,7 +429,7 @@ fn type_check_stmt(
             let snapshot = env.snapshot();
             let mut checked = Vec::new();
             for st in seq {
-                checked.push(type_check_stmt(st, env, expected_return, msgs)?);
+                checked.push(type_check_stmt(st, env, expected_return, msgs, current_process)?);
             }
             env.restore(snapshot);
             Statement::Block { seq: checked }
@@ -354,10 +440,21 @@ fn type_check_stmt(
                 .map(|a| type_check_expr_to_typed(a, env))
                 .collect();
             let args_checked = args_checked?;
-            check_call(name, &args_checked, env)?;
-            Statement::Call {
-                name: name.clone(),
-                args: args_checked,
+            if current_process == Some(name.as_str()) {
+                // `counter(n + k);` inside process `counter`: a tail-recursive
+                // restart of the same process (same pid and mailbox).
+                // Tail position is verified afterwards by `check_tail_recursion`.
+                check_process_args(name, &args_checked, env)?;
+                Statement::Recur {
+                    process: name.clone(),
+                    args: args_checked,
+                }
+            } else {
+                check_call(name, &args_checked, env)?;
+                Statement::Call {
+                    name: name.clone(),
+                    args: args_checked,
+                }
             }
         }
         Statement::If {
@@ -372,10 +469,10 @@ fn type_check_stmt(
                     cond_checked.ty
                 )));
             }
-            let then_checked = type_check_stmt(then_branch, env, expected_return, msgs)?;
+            let then_checked = type_check_stmt(then_branch, env, expected_return, msgs, current_process)?;
             let else_checked = else_branch
                 .as_ref()
-                .map(|e| type_check_stmt(e, env, expected_return, msgs))
+                .map(|e| type_check_stmt(e, env, expected_return, msgs, current_process))
                 .transpose()?;
             Statement::If {
                 cond: Box::new(cond_checked),
@@ -391,7 +488,7 @@ fn type_check_stmt(
                     cond_checked.ty
                 )));
             }
-            let body_checked = type_check_stmt(body, env, expected_return, msgs)?;
+            let body_checked = type_check_stmt(body, env, expected_return, msgs, current_process)?;
             Statement::While {
                 cond: Box::new(cond_checked),
                 body: Box::new(body_checked),
@@ -500,7 +597,7 @@ fn type_check_stmt(
                     }
                     env.declare(param_name.clone(), param_ty.clone());
                 }
-                let body_checked = type_check_stmt(&clause.body, env, expected_return, msgs)?;
+                let body_checked = type_check_stmt(&clause.body, env, expected_return, msgs, current_process)?;
                 env.restore(snapshot);
                 checked_clauses.push(ReceiveClause {
                     tag: clause.tag.clone(),
@@ -511,6 +608,11 @@ fn type_check_stmt(
             Statement::Receive {
                 clauses: checked_clauses,
             }
+        }
+        Statement::Recur { .. } => {
+            return Err(TypeError::new(
+                "internal error: Recur is produced by the type checker, not the parser",
+            ))
         }
     };
     Ok(StatementD {
@@ -826,39 +928,8 @@ fn type_check_expr(
         Expr::Spawn { process, args } => {
             let args_checked: Result<Vec<_>, _> =
                 args.iter().map(|a| type_check_expr_to_typed(a, env)).collect();
-            let args_checked = args_checked?;
-            match env.get(process) {
-                Some(Type::Process(param_tys)) => {
-                    if args_checked.len() != param_tys.len() {
-                        return Err(TypeError::new(format!(
-                            "process '{}' expects {} arguments, got {}",
-                            process,
-                            param_tys.len(),
-                            args_checked.len()
-                        )));
-                    }
-                    for (i, (arg, param_ty)) in
-                        args_checked.iter().zip(param_tys.iter()).enumerate()
-                    {
-                        if !types_compatible(&arg.ty, param_ty) {
-                            return Err(TypeError::new(format!(
-                                "argument {} to process {}: expected {:?}, got {:?}",
-                                i + 1,
-                                process,
-                                param_ty,
-                                arg.ty
-                            )));
-                        }
-                    }
-                    Ok(Type::Pid)
-                }
-                Some(Type::Fun(_, _)) => Err(TypeError::new(format!(
-                    "'{}' is a function, not a process; call it directly",
-                    process
-                ))),
-                Some(_) => Err(TypeError::new(format!("'{}' is not a process", process))),
-                None => Err(TypeError::new(format!("undefined process: {}", process))),
-            }
+            check_process_args(process, &args_checked?, env)?;
+            Ok(Type::Pid)
         }
         Expr::SelfPid => Ok(Type::Pid),
     }

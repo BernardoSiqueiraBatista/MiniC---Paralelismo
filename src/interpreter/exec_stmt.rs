@@ -6,23 +6,25 @@
 //!
 //! * [`exec_stmt`] — executes a [`CheckedStmt`] within the current process
 //!   context ([`ProcCtx`]) and returns an [`ExecResult`]:
-//!   * `Ok(None)` — the statement completed normally (no early return).
-//!   * `Ok(Some(value))` — a `return` statement was hit; the value is
+//!   * `Ok(Flow::Normal)` — the statement completed normally.
+//!   * `Ok(Flow::Return(value))` — a `return` statement was hit; the value is
 //!     propagated up to the caller (`eval_call` in `eval_expr`).
+//!   * `Ok(Flow::Recur(args))` — a process called itself in tail position
+//!     (`counter(n + k);`); propagated up to `run_process`, which restarts the
+//!     process body with `args` (same pid, same mailbox).
 //!   * `Err(RuntimeError)` — a runtime error occurred.
 //!
-//! Also defines `ExecResult`, the return type alias used throughout.
+//! Also defines [`Flow`] and `ExecResult`, the return type alias used throughout.
 //!
 //! # Design Decisions
 //!
-//! ## `Option<Value>` to signal early return
+//! ## `Flow` to signal early exit
 //!
-//! Statements do not inherently produce values, but a `return` statement
-//! inside a function body must pass its value back through potentially many
-//! levels of nested `exec_stmt` calls (blocks inside loops inside `receive`
-//! clauses, etc.). Using `Option<Value>` as the success case of `ExecResult`
-//! encodes this cleanly: `None` means "keep going", `Some(v)` means "stop and
-//! return this value".
+//! Statements do not inherently produce values, but a `return` (or a
+//! tail-recursive process restart) must pass through potentially many levels
+//! of nested `exec_stmt` calls (blocks inside `if`s inside `receive` clauses,
+//! etc.). Every compound statement stops and propagates any non-`Normal`
+//! `Flow` immediately.
 //!
 //! ## Block and `receive` clause scoping via `names` / `remove_new`
 //!
@@ -39,10 +41,20 @@ use super::eval_expr::{eval_call, eval_expr};
 use super::runtime::{ProcCtx, RtMessage};
 use super::value::{RuntimeError, Value};
 
-/// `None` = normal fall-through; `Some(v)` = early return with value.
-pub type ExecResult = Result<Option<Value>, RuntimeError>;
+/// How control leaves a statement.
+#[derive(Debug, Clone)]
+pub enum Flow {
+    /// Fall through to the next statement.
+    Normal,
+    /// A `return` was executed with this value.
+    Return(Value),
+    /// The current process asked to restart itself with these arguments.
+    Recur(Vec<Value>),
+}
 
-/// Execute a checked statement. Returns `Some(v)` if a `return` was hit.
+pub type ExecResult = Result<Flow, RuntimeError>;
+
+/// Execute a checked statement.
 pub fn exec_stmt(
     stmt: &CheckedStmt,
     env: &mut Environment<Value>,
@@ -53,14 +65,14 @@ pub fn exec_stmt(
         Statement::Decl { name, init, .. } => {
             let val = eval_expr(init, env, ctx)?;
             env.declare(name.clone(), val);
-            Ok(None)
+            Ok(Flow::Normal)
         }
 
         // --- Assignment ---
         Statement::Assign { target, value } => {
             let val = eval_expr(value, env, ctx)?;
             assign_lvalue(target, val, env, ctx)?;
-            Ok(None)
+            Ok(Flow::Normal)
         }
 
         // --- Block ---
@@ -70,19 +82,15 @@ pub fn exec_stmt(
             let outer_keys = env.names();
             for s in seq {
                 match exec_stmt(s, env, ctx) {
-                    Ok(Some(ret)) => {
+                    Ok(Flow::Normal) => {}
+                    other => {
                         env.remove_new(&outer_keys);
-                        return Ok(Some(ret));
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        env.remove_new(&outer_keys);
-                        return Err(e);
+                        return other;
                     }
                 }
             }
             env.remove_new(&outer_keys);
-            Ok(None)
+            Ok(Flow::Normal)
         }
 
         // --- If ---
@@ -96,7 +104,7 @@ pub fn exec_stmt(
                 if let Some(eb) = else_branch {
                     exec_stmt(eb, env, ctx)
                 } else {
-                    Ok(None)
+                    Ok(Flow::Normal)
                 }
             }
             v => Err(RuntimeError::new(format!(
@@ -109,11 +117,12 @@ pub fn exec_stmt(
         Statement::While { cond, body } => loop {
             match eval_expr(cond, env, ctx)? {
                 Value::Bool(true) => {
-                    if let Some(ret) = exec_stmt(body, env, ctx)? {
-                        return Ok(Some(ret));
+                    match exec_stmt(body, env, ctx)? {
+                        Flow::Normal => {}
+                        exit => return Ok(exit),
                     }
                 }
-                Value::Bool(false) => return Ok(None),
+                Value::Bool(false) => return Ok(Flow::Normal),
                 v => {
                     return Err(RuntimeError::new(format!(
                         "while condition must be bool, got: {}",
@@ -126,16 +135,25 @@ pub fn exec_stmt(
         // --- Return ---
         Statement::Return(Some(expr)) => {
             let val = eval_expr(expr, env, ctx)?;
-            Ok(Some(val))
+            Ok(Flow::Return(val))
         }
-        Statement::Return(None) => Ok(Some(Value::Void)),
+        Statement::Return(None) => Ok(Flow::Return(Value::Void)),
 
         // --- Statement-level function call ---
         Statement::Call { name, args } => {
             let arg_vals: Result<Vec<Value>, RuntimeError> =
                 args.iter().map(|a| eval_expr(a, env, ctx)).collect();
             eval_call(name, arg_vals?, env, ctx)?;
-            Ok(None)
+            Ok(Flow::Normal)
+        }
+
+        // --- Tail-recursive process restart: `counter(n + k);` ---
+        // Arguments are evaluated now; the restart itself happens in
+        // `run_process`, after every enclosing statement has unwound.
+        Statement::Recur { args, .. } => {
+            let arg_vals: Result<Vec<Value>, RuntimeError> =
+                args.iter().map(|a| eval_expr(a, env, ctx)).collect();
+            Ok(Flow::Recur(arg_vals?))
         }
 
         // --- Asynchronous message send ---
@@ -161,7 +179,7 @@ pub fn exec_stmt(
                     args: arg_vals?,
                 },
             );
-            Ok(None)
+            Ok(Flow::Normal)
         }
 
         // --- Selective blocking receive ---

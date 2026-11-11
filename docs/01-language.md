@@ -276,6 +276,32 @@ void main() {
 - `send target ! tag(args);` asynchronously copies `args` and appends `tag(args)` to `target`'s mailbox.
 - `receive { tag(params) => { ... } ... }` selectively consumes the oldest matching message in the current process's mailbox, suspending the process without busy-waiting until a matching message arrives.
 
+### Server loops with tail recursion (Erlang style)
+
+A `receive` handles exactly one message, and a process ends when its body
+ends. Instead of a `while running` loop, a process can call **itself** as its
+last statement to handle the next message, passing its state as arguments:
+
+```c
+process counter(int n) {
+  receive {
+    inc(int k) => { counter(n + k); }
+    get(pid from) => {
+      send from ! value(n);
+      counter(n);
+    }
+    stop() => { }          // no self-call: the process ends
+  }
+}
+```
+
+- The self-call does **not** create a new process: it keeps the same `pid`
+  and the same mailbox, and runs the body again with the new arguments.
+- It must be in **tail position** (the last statement executed): the last
+  statement of a block, of an `if` branch, or of a `receive` clause. It is
+  not allowed inside a `while` or followed by other statements.
+- Calling a *different* process still requires `spawn`.
+
 ---
 
 **What to read next →** [02-pipeline.md](02-pipeline.md)

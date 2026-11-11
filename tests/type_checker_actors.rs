@@ -419,3 +419,134 @@ fn test_checked_spawn_has_pid_type_annotation() {
         panic!("expected Block");
     }
 }
+
+// --- Tail-recursive processes (Erlang-style server loop) ---
+
+#[test]
+fn test_fixture_counter_recursive_well_typed() {
+    let checked = check_fixture("actor_counter_recursive.minic")
+        .expect("actor_counter_recursive should type-check");
+    assert_eq!(checked.processes.len(), 1);
+}
+
+#[test]
+fn test_tail_self_call_becomes_recur() {
+    let checked = check(
+        r#"
+        process loop_forever(int n) {
+            receive {
+                tick() => { loop_forever(n + 1); }
+            }
+        }
+        void main() { send spawn loop_forever(0) ! tick(); }
+        "#,
+    )
+    .expect("tail self-call should type-check");
+    let body = format!("{:?}", checked.processes[0].body);
+    assert!(body.contains("Recur"), "{}", body);
+}
+
+#[test]
+fn test_tail_self_call_allowed_in_both_if_branches() {
+    check(
+        r#"
+        process p(int n) {
+            if n > 0 { p(n - 1); } else { p(n + 1); }
+        }
+        void main() { }
+        "#,
+    )
+    .expect("self-call in both if branches is in tail position");
+}
+
+#[test]
+fn test_self_call_not_last_is_rejected() {
+    let err = check(
+        r#"
+        process p(int n) {
+            p(n + 1);
+            print(n);
+        }
+        void main() { }
+        "#,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("tail position"), "{}", err.message);
+}
+
+#[test]
+fn test_self_call_inside_while_is_rejected() {
+    let err = check(
+        r#"
+        process p(int n) {
+            while true { p(n + 1); }
+        }
+        void main() { }
+        "#,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("tail position"), "{}", err.message);
+}
+
+#[test]
+fn test_self_call_followed_by_statement_in_clause_is_rejected() {
+    let err = check(
+        r#"
+        process p(int n) {
+            receive {
+                tick() => { p(n + 1); }
+            }
+            print(n);
+        }
+        void main() { send self ! tick(); }
+        "#,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("tail position"), "{}", err.message);
+}
+
+#[test]
+fn test_self_call_wrong_arguments_rejected() {
+    let arity = check(
+        r#"
+        process p(int n) { p(); }
+        void main() { }
+        "#,
+    )
+    .unwrap_err();
+    assert!(arity.message.contains("expects 1 arguments"), "{}", arity.message);
+
+    let ty = check(
+        r#"
+        process p(int n) { p(true); }
+        void main() { }
+        "#,
+    )
+    .unwrap_err();
+    assert!(ty.message.contains("expected Int"), "{}", ty.message);
+}
+
+#[test]
+fn test_calling_another_process_still_requires_spawn() {
+    let err = check(
+        r#"
+        process a() { }
+        process b() { a(); }
+        void main() { }
+        "#,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("use spawn"), "{}", err.message);
+}
+
+#[test]
+fn test_self_call_as_expression_rejected() {
+    let err = check(
+        r#"
+        process p(int n) { int x = p(n); }
+        void main() { }
+        "#,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("is a process"), "{}", err.message);
+}

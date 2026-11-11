@@ -191,6 +191,15 @@ pub enum Statement<Ty> {
     Receive {
         clauses: Vec<ReceiveClause<Ty>>,
     },
+    /// Tail-recursive restart of the current process: `counter(n + k);`
+    /// written as the last statement of process `counter`. The process keeps
+    /// its pid and mailbox and runs its body again with the new arguments
+    /// (Erlang-style server loop). Never produced by the parser: the type
+    /// checker rewrites a tail-position self-call (`Call`) into `Recur`.
+    Recur {
+        process: String,
+        args: Vec<ExprD<Ty>>,
+    },
 }
 
 /// A typed parameter: (name, type).

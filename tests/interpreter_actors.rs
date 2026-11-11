@@ -329,3 +329,87 @@ fn test_parallel_workers_sum_of_squares() {
     let res = run(src);
     assert!(res.is_ok(), "{:?}", res.err());
 }
+
+// --- Tail-recursive processes (Erlang-style server loop) ---
+
+#[test]
+fn test_run_fixture_actor_counter_recursive() {
+    let res = run_fixture("actor_counter_recursive.minic");
+    assert!(res.is_ok(), "{:?}", res.err());
+}
+
+#[test]
+fn test_recursive_process_keeps_pid_and_mailbox() {
+    // The process restarts but keeps its pid (`self`) and its mailbox: the
+    // three `ping`s are all sent before it restarts the first time.
+    let src = r#"
+        process echo(int round, pid parent) {
+            receive {
+                ping() => {
+                    send parent ! pong(self, round);
+                    echo(round + 1, parent);
+                }
+                stop() => { }
+            }
+        }
+        void main() {
+            pid e = spawn echo(0, self);
+            send e ! ping();
+            send e ! ping();
+            send e ! ping();
+            int got = 0;
+            while got < 3 {
+                receive {
+                    pong(pid from, int round) => {
+                        if from != e or round != got {
+                            int[] f = [0];
+                            int b = f[99];
+                        }
+                        got = got + 1;
+                    }
+                }
+            }
+            send e ! stop();
+        }
+    "#;
+    let res = run(src);
+    assert!(res.is_ok(), "{:?}", res.err());
+}
+
+#[test]
+fn test_recursive_process_does_not_grow_stack() {
+    // 200_000 restarts would overflow the stack if each self-call nested a
+    // Rust call; the runtime restarts the body in a loop instead.
+    let src = r#"
+        process countdown(int n, pid parent) {
+            if n == 0 {
+                send parent ! finished();
+            } else {
+                countdown(n - 1, parent);
+            }
+        }
+        void main() {
+            pid c = spawn countdown(200000, self);
+            receive { finished() => { print("ok"); } }
+        }
+    "#;
+    let res = run(src);
+    assert!(res.is_ok(), "{:?}", res.err());
+}
+
+#[test]
+fn test_idle_recursive_server_shuts_down_when_main_ends() {
+    let src = r#"
+        process server(int n) {
+            receive {
+                inc() => { server(n + 1); }
+            }
+        }
+        void main() {
+            pid s = spawn server(0);
+            send s ! inc();
+        }
+    "#;
+    let res = run(src);
+    assert!(res.is_ok(), "{:?}", res.err());
+}

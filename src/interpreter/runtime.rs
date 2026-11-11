@@ -53,7 +53,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::ir::ast::{CheckedProcessDecl, CheckedProgram};
 
-use super::exec_stmt::exec_stmt;
+use super::exec_stmt::{exec_stmt, Flow};
 use super::value::{RuntimeError, Value};
 
 /// Process identifier.
@@ -376,10 +376,23 @@ fn run_process(rt: Arc<Runtime>, pid: Pid, decl: CheckedProcessDecl, args: Vec<V
     };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut env = super::base_env(&rt.program);
-        for ((name, _), val) in decl.params.iter().zip(args) {
-            env.declare(name.clone(), val);
+        // Bindings shared by every iteration: stdlib + user functions only.
+        let base = env.snapshot();
+        let mut args = args;
+        // Erlang-style server loop: when the body ends with a tail-recursive
+        // self-call (`counter(n + k);`), restart the body with the new
+        // arguments. The process keeps its pid and mailbox, and the Rust
+        // stack does not grow, so a server can loop forever.
+        loop {
+            env.restore(base.clone());
+            for ((name, _), val) in decl.params.iter().zip(args) {
+                env.declare(name.clone(), val);
+            }
+            match exec_stmt(&decl.body, &mut env, &ctx)? {
+                Flow::Recur(next_args) => args = next_args,
+                Flow::Normal | Flow::Return(_) => return Ok(()),
+            }
         }
-        exec_stmt(&decl.body, &mut env, &ctx).map(|_| ())
     }));
     let result = match outcome {
         Ok(res) => res,

@@ -1,0 +1,21 @@
+process counter(int n) {
+    receive {
+        inc(int k) => { counter(n + k); }
+        get(pid from) => {
+            send from ! value(n);
+            counter(n);
+        }
+        stop() => { }
+    }
+}
+
+void main() {
+    pid c = spawn counter(0);
+    send c ! inc(5);
+    send c ! inc(2);
+    send c ! get(self);
+    receive {
+        value(int v) => { print(v); }
+    }
+    send c ! stop();
+}

@@ -41,3 +41,8 @@ $ ./target/debug/mini_c --run tests/fixtures/actor_isolation.minic
 $ ./target/debug/mini_c --run tests/fixtures/actor_deadlock.minic
 >2 /deadlock/
 >=1
+
+# --run executes the Erlang-style counter (tail recursion instead of while)
+$ ./target/debug/mini_c --run tests/fixtures/actor_counter_recursive.minic
+7
+>=0

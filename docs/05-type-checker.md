@@ -177,6 +177,13 @@ types in the surface syntax:
 4. **`receive` clauses.** Clauses within a single `receive` must have distinct
    tags and non-void, non-duplicate, non-shadowing parameters. Each clause body
    is checked in a snapshot scope with its parameters bound.
+5. **Tail-recursive processes.** Inside process `p`, the statement `p(args);`
+   is checked like `spawn p(args)` (arity and argument types) and rewritten
+   into `Statement::Recur`. After the body is checked, `check_tail_recursion`
+   verifies that every `Recur` is in tail position: tail position flows into
+   the last statement of a block, both `if` branches and every `receive`
+   clause, but never into a `while` body. Calling any other process, or using
+   `p(...)` as an expression, is still rejected ("use spawn").
 
 ---
 

@@ -188,6 +188,16 @@ Processes never spin-wait on their mailboxes:
   recipient `Running` and wake **that specific process** via `cond.notify_one()`.
   Messages to already-finished processes are silently discarded.
 
+### Tail-recursive restart (`Flow::Recur`)
+
+`exec_stmt` returns a `Flow`: `Normal`, `Return(value)` or `Recur(args)`.
+Executing `Statement::Recur` evaluates the new arguments and returns
+`Flow::Recur(args)`, which every enclosing statement propagates immediately.
+`run_process` runs the process body inside a loop: on `Flow::Recur` it resets
+the environment to the base bindings, binds the new arguments, and runs the
+body again. The pid, mailbox and `Condvar` are untouched, and the Rust stack
+does not grow, so a server can handle an unbounded number of messages.
+
 ### Quiescence, idle servers, and deadlock detection
 
 When every alive process is blocked in `receive` with no matching message in

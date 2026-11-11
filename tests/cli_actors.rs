@@ -59,3 +59,10 @@ fn test_cli_run_actor_deadlock_exits_1() {
     assert_eq!(code, 1);
     assert!(stderr.contains("deadlock"), "stderr: {}", stderr);
 }
+
+#[test]
+fn test_cli_run_actor_counter_recursive_prints_7() {
+    let (code, stdout, stderr) = run_cli("--run", "actor_counter_recursive.minic");
+    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_eq!(stdout, "7\n");
+}
